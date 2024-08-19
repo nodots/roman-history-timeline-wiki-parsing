@@ -1,135 +1,129 @@
-import fs from 'fs'
-import wiki, { html, infobox, intro, links, media } from 'wikipedia'
+import wiki, { Page } from 'wikipedia'
+import { parseTable } from './helpers'
+import { coordinatesResult } from 'wikipedia'
+import {
+  EventAsset,
+  EventDetail,
+  Timeline,
+  TimelineData,
+  TimelineEvent,
+} from './Types'
 import { DOMParser } from 'xmldom'
+import { writeFile } from 'fs'
 
-interface EventMedia {
-  links: HTMLLinkElement[]
-  images: HTMLImageElement[]
-  other: any[]
-}
-
-interface RtEvent {
-  year: string
-  date: string
-  event: string
-  description?: string
-  eventMedia: EventMedia
-}
-
-const getOverview = async (endpoint: string) => {
-  const pageKey = endpoint.split('/')[2]
-  try {
-    const detailPage = await wiki.page(pageKey)
-    const detailOverview = await detailPage.intro()
-    return detailOverview
-  } catch (error) {
-    console.error(error)
-  }
-}
-
-const getRomanHistory = async () => {
-  const romanHistory = await wiki.page('Timeline_of_Roman_history')
-
+const getEventAssets = async (page: Page): Promise<EventAsset> => {
   return {
-    pageId: romanHistory.pageid,
-    title: romanHistory.title,
-    content: await romanHistory.content(),
-    // images: await romanHistory.images(),
-    categories: await romanHistory.categories(),
-    infobox: await romanHistory.infobox(),
-    links: await romanHistory.links(),
-    media: await romanHistory.media(),
-    html: await romanHistory.html(),
-    intro: await romanHistory.intro(),
+    links: await page.links(),
+    images: await page.images(),
+    other: [await page.media()],
   }
 }
 
-const parseEventContent = (cell: any) => {
-  const eventMedia: EventMedia = {
-    links: [],
-    images: [],
-    other: [],
+const getTimelineDataFromWiki = async (): Promise<TimelineData> => {
+  const timeline = await wiki.page('Timeline_of_Roman_history')
+  const content = await timeline.content()
+  const categories = await timeline.categories()
+  const infobox = await timeline.infobox()
+  const links = await timeline.links()
+  const media = await timeline.media()
+  const html = await timeline.html()
+  const intro = await timeline.intro()
+  return {
+    title: timeline.title,
+    content,
+    categories,
+    infobox,
+    links,
+    media,
+    html,
+    intro,
   }
-  if (typeof cell === 'object' && cell.childNodes.length > 0) {
-    for (let i = 0; i < cell.childNodes.length; i++) {
-      const child = cell.childNodes[i]
-      switch (child.nodeName) {
-        case 'a':
-          const link = child as HTMLLinkElement
-          eventMedia.links.push(link)
-          break
-        case 'img':
-          const img = child as HTMLImageElement
-          eventMedia.images.push(img)
-          break
-        default:
-          eventMedia.other.push(child)
-      }
-    }
-  }
-  return eventMedia
 }
 
-const parseTable = async (table: HTMLTableElement) => {
-  const tableClass = table.getAttribute('class')
-  if (tableClass !== 'wikitable') {
-    return
+export const getEventDetail = async (query: string): Promise<EventDetail> => {
+  const eventDetail: EventDetail = {
+    synopsis: '',
+    assets: {
+      links: [],
+      images: [],
+      other: [],
+    },
   }
-  const tableDataArray: RtEvent[] = []
   try {
-    const body = table.getElementsByTagName('tbody')[0]
-    const rows = body.getElementsByTagName('tr')
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      const cells = row.getElementsByTagName('td')
-      if (cells.length >= 2) {
-        const yearCell = cells[0]
-        const dateCell = cells[1]
-        const eventCell = cells[2]
-        const eventMedia = parseEventContent(eventCell)
+    const search = await wiki.search(query)
+    const key = search.results[0].title
 
-        if (eventMedia.links.length > 0) {
-          const link = eventMedia.links[0].getAttribute('href')
-          let description = ''
-          if (link) {
-            description = (await getOverview(link)) || ''
-          }
-          if (eventCell) {
-            const encodedEvent = {
-              year: yearCell.textContent ? yearCell.textContent : '',
-              date: dateCell.textContent ? dateCell.textContent : '',
-              event: eventCell.textContent ? eventCell.textContent : '',
-              description,
-              eventMedia,
-            }
-            tableDataArray.push(encodedEvent)
-          }
+    const childPage = await wiki.page(key)
+
+    const assets = await getEventAssets(childPage)
+    eventDetail.synopsis = await childPage.intro()
+    eventDetail.geooordinates = await childPage.coordinates()
+    eventDetail.assets = assets
+  } catch (error) {
+    // console.error(error)
+  }
+  return eventDetail
+}
+
+const buildMapUrl = (coordinates: coordinatesResult | undefined) => {
+  const lat = coordinates?.lat || 33.09
+  const lon = coordinates?.lon || 41.89
+  const url = `https://www.openhistoricalmap.org/?mlat=${lat}&mlon=${lon}&zoom=13#map=17/41.89511/12.47703&layers=&daterange=-43-03-01,-3-03-31`
+  return url
+}
+
+const saveEvent = async (event: TimelineEvent) => {
+  try {
+    const jsonEvent = {
+      year: event.year,
+      date: event.date,
+      title: event.overview,
+      synopsis: event.detail?.synopsis,
+      geocoordinates: event.detail?.geooordinates,
+      mapUrl: buildMapUrl(event.detail?.geooordinates),
+    }
+    writeFile(
+      'timeline.json',
+      JSON.stringify(jsonEvent, null, 2) + ',\n',
+      { flag: 'a' },
+      (err) => {
+        if (err) {
+          console.error(err)
         }
       }
-    }
-  } catch (error) {
-    console.error(error)
+    )
+  } catch (e) {
+    console.warn(e)
   }
-  return tableDataArray
 }
 
-const parseTables = async (html: string) => {
-  const document = new DOMParser().parseFromString(html, 'text/html')
-  const tables = document.getElementsByTagName('table')
-  const events: RtEvent[] = []
-
-  for (let i = 0; i < tables.length; i++) {
-    const table = tables[i]
-    const tableData = await parseTable(table)
-    if (tableData) {
-      events.push(...tableData)
+const main = () => {
+  getTimelineDataFromWiki().then((wikiData) => {
+    const rawHtml = wikiData.html
+    const document = new DOMParser().parseFromString(rawHtml, 'text/html')
+    const tables = document.getElementsByTagName('table')
+    const timeline: Timeline = []
+    for (let i = 0; i < tables.length; i++) {
+      const table = tables[i]
+      if (table.getAttribute('class') === 'wikitable') {
+        parseTable(table).then((events) => {
+          events?.forEach(async (event) => {
+            await saveEvent(event)
+          })
+        })
+      }
     }
-  }
-  return events
-}
-
-getRomanHistory().then((data) => {
-  parseTables(data.html).then((events) => {
-    console.log(events)
   })
-})
+}
+
+// const timeline: Timeline = []
+// getTimelineDataFromWiki().then((data) => {
+//   console.log(data.title)
+//   getTimelineFromTables(data.html, startYear, endYear).then((events) => {
+//     events && timeline.push(...events)
+//   })
+// })
+// console.log(`Timeline:`, timeline)
+// return timeline
+
+main()
